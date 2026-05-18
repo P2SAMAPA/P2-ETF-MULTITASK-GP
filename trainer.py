@@ -6,7 +6,7 @@ from datetime import datetime
 import torch
 import config
 import data_manager
-from multitask_gp import train_mtgp, predict
+from multitask_gp import train_individual_gps, predict_individual
 
 def convert_to_serializable(obj):
     if isinstance(obj, np.ndarray):
@@ -71,13 +71,12 @@ def main():
             X_t = torch.tensor(X, dtype=torch.float32).to(device)
             Y_t = torch.tensor(Y, dtype=torch.float32).to(device)
             num_tasks = Y.shape[1]
-            model, likelihood = train_mtgp(X_t, Y_t, num_tasks,
-                                           n_inducing=config.N_INDUCING,
-                                           lr=config.LR,
-                                           iterations=config.ITERATIONS)
+            models, likelihoods = train_individual_gps(X_t, Y_t, num_tasks,
+                                                       lr=config.LR,
+                                                       iterations=config.ITERATIONS)
             test_X = X[-1:].reshape(1, -1)
             test_X_t = torch.tensor(test_X, dtype=torch.float32).to(device)
-            mean = predict(model, likelihood, test_X_t, num_tasks)
+            mean = predict_individual(models, likelihoods, test_X_t, num_tasks)
             scores = {tickers[i]: mean[i] for i in range(num_tasks)}
             window_results[win] = scores
             for etf, score in scores.items():
