@@ -9,24 +9,26 @@ import data_manager
 from multitask_gp import train_mtgp, predict
 from sklearn.preprocessing import StandardScaler
 
-def create_dataset(returns_df, macro_df, window, seq_len=5):
-    """
-    Build training set: input X = time index + macro values at time t,
-    target Y = ETF returns at time t+1.
-    """
-    # Use last `window` days
-    ret_win = returns_df.iloc[-window:]
-    macro_win = macro_df.iloc[-window:] if not macro_df.empty else pd.DataFrame(0, index=ret_win.index, columns=config.MACRO_COLUMNS)
-    # Create time index (normalised)
-    t = np.arange(len(ret_win)).reshape(-1,1) / len(ret_win)
-    # Macro values
-    macro_vals = macro_win.values
-    # Input features: time + macro
+def create_dataset(returns_df, macro_df, window):
+    # Take last `window` days from returns
+    ret_win = returns_df.iloc[-window:].copy()
+    # Macro data aligned to the same dates as ret_win (use reindex)
+    macro_win = macro_df.reindex(ret_win.index).ffill()
+    # Drop rows where macro is NaN (if any)
+    combined = pd.concat([ret_win, macro_win], axis=1).dropna()
+    if len(combined) < 2:
+        return None, None
+    # Separate returns and macro
+    ret_aligned = combined[returns_df.columns]
+    macro_aligned = combined[macro_df.columns]
+    # Time index (normalised)
+    t = np.arange(len(ret_aligned)).reshape(-1,1) / len(ret_aligned)
+    macro_vals = macro_aligned.values
     X = np.hstack([t, macro_vals])
-    # Target: next day returns (shift -1)
-    Y = ret_win.shift(-1).dropna().values
-    X = X[:-1]   # align
-    return torch.tensor(X, dtype=torch.float32), torch.tensor(Y, dtype=torch.float32)
+    # Target: next day return (shift -1)
+    Y = ret_aligned.shift(-1).dropna().values
+    X = X[:-1]  # align
+    return X, Y
 
 def main():
     if not config.HF_TOKEN:
@@ -60,16 +62,22 @@ def main():
                 continue
             print(f"  Processing window {win}d...")
             X, Y = create_dataset(returns, macro, win)
-            if X.shape[0] < 20:
+            if X is None or X.shape[0] < 20:
+                print(f"    Not enough samples after alignment for window {win}d")
                 continue
+            X_t = torch.tensor(X, dtype=torch.float32).to(device)
+            Y_t = torch.tensor(Y, dtype=torch.float32).to(device)
             num_tasks = Y.shape[1]
             num_macros = len(config.MACRO_COLUMNS)
-            model, likelihood = train_mtgp(X, Y, num_tasks, num_macros, lr=config.LR, iterations=config.ITERATIONS)
-            # Predict for the most recent point (last time step + macro values)
-            # Use the last row of X (the input features for the last day)
-            test_X = X[-1:].to(device)
-            mean, _, _ = predict(model, likelihood, test_X)
-            scores = {tickers[i]: mean[0, i] for i in range(num_tasks)}
+            model, likelihood = train_mtgp(X_t, Y_t, num_tasks, num_macros,
+                                           n_inducing=config.N_INDUCING,
+                                           lr=config.LR,
+                                           iterations=config.ITERATIONS)
+            # Predict for the most recent day (last row of X)
+            test_X = X[-1:].reshape(1, -1)
+            test_X_t = torch.tensor(test_X, dtype=torch.float32).to(device)
+            mean = predict(model, likelihood, test_X_t, num_tasks)
+            scores = {tickers[i]: mean[i] for i in range(num_tasks)}
             window_results[win] = scores
             for etf, score in scores.items():
                 if etf not in best_per_etf or score > best_per_etf[etf][0]:
@@ -90,7 +98,7 @@ def main():
         sorted_etfs = sorted(best_per_etf.items(), key=lambda x: x[1][0], reverse=True)
         top_etfs = [{"ticker": ticker, "score": float(score), "best_window": win} for ticker, (score, win) in sorted_etfs[:config.TOP_N]]
 
-        print(f"  Top 3 ETFs by GP predicted return: {[e['ticker'] for e in top_etfs]}")
+        print(f"  Top 3 ETFs by GP mean: {[e['ticker'] for e in top_etfs]}")
         all_results[universe_name] = {
             "top_etfs": top_etfs,
             "full_scores": full_scores,
