@@ -53,5 +53,5 @@ def predict(model, likelihood, test_X, num_tasks):
         mean = pred.mean.cpu().numpy()
         # Ensure it's a 1D array of length num_tasks
         if mean.size == 1 and num_tasks > 1:
-            mean = mean * np.ones(num_tasks)
+            mean = np.full(num_tasks, mean.item())
     return mean
