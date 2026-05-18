@@ -7,22 +7,33 @@ import torch
 import config
 import data_manager
 from multitask_gp import train_mtgp, predict
-from sklearn.preprocessing import StandardScaler
+
+def convert_to_serializable(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [convert_to_serializable(i) for i in obj]
+    return obj
 
 def create_dataset(returns_df, macro_df, window):
-    # Use last `window` days
-    ret_win = returns_df.iloc[-window:].copy()
+    ret_win = returns_df.iloc[-window:]
     macro_win = macro_df.iloc[-window:] if not macro_df.empty else pd.DataFrame(0, index=ret_win.index, columns=config.MACRO_COLUMNS)
-    # Align indices (macro may have fewer rows due to NaN)
-    common = ret_win.index.intersection(macro_win.index)
-    ret_win = ret_win.loc[common]
-    macro_win = macro_win.loc[common]
+    # Align by index
+    common_idx = ret_win.index.intersection(macro_win.index)
+    ret_win = ret_win.loc[common_idx]
+    macro_win = macro_win.loc[common_idx]
     t = np.arange(len(ret_win)).reshape(-1,1) / len(ret_win)
     macro_vals = macro_win.values
     X = np.hstack([t, macro_vals])
     Y = ret_win.shift(-1).dropna().values
     X = X[:-1]
-    return torch.tensor(X, dtype=torch.float32), torch.tensor(Y, dtype=torch.float32)
+    return X, Y
 
 def main():
     if not config.HF_TOKEN:
@@ -58,16 +69,18 @@ def main():
             X, Y = create_dataset(returns, macro, win)
             if X.shape[0] < 20:
                 continue
-            X_t = X.to(device)
-            Y_t = Y.to(device)
+            X_t = torch.tensor(X, dtype=torch.float32).to(device)
+            Y_t = torch.tensor(Y, dtype=torch.float32).to(device)
             num_tasks = Y.shape[1]
-            model, likelihood = train_mtgp(X_t, Y_t, num_tasks,
+            num_macros = len(config.MACRO_COLUMNS)
+            model, likelihood = train_mtgp(X_t, Y_t, num_tasks, num_macros,
+                                           n_inducing=config.N_INDUCING,
                                            lr=config.LR,
                                            iterations=config.ITERATIONS)
-            # Predict for the most recent day (last row of X)
-            test_X = X[-1:].to(device)
-            mean = predict(model, likelihood, test_X)
-            scores = {tickers[i]: mean[0, i] for i in range(num_tasks)}
+            test_X = X[-1:].reshape(1, -1)
+            test_X_t = torch.tensor(test_X, dtype=torch.float32).to(device)
+            mean = predict(model, likelihood, test_X_t, num_tasks)
+            scores = {tickers[i]: mean[i] for i in range(num_tasks)}
             window_results[win] = scores
             for etf, score in scores.items():
                 if etf not in best_per_etf or score > best_per_etf[etf][0]:
@@ -99,7 +112,7 @@ def main():
     Path("results").mkdir(exist_ok=True)
     local_path = Path(f"results/multitask_gp_{today}.json")
     with open(local_path, "w") as f:
-        json.dump({"run_date": today, "universes": all_results}, f, indent=2)
+        json.dump(convert_to_serializable({"run_date": today, "universes": all_results}), f, indent=2)
 
     import push_results
     push_results.push_daily_result(local_path)
