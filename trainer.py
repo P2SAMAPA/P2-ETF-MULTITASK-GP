@@ -78,9 +78,6 @@ def main():
             test_X = X[-1:].reshape(1, -1)
             test_X_t = torch.tensor(test_X, dtype=torch.float32).to(device)
             mean = predict(model, likelihood, test_X_t, num_tasks)
-            if mean.size != num_tasks:
-                print(f"    Warning: mean size {mean.size} != num_tasks {num_tasks}, using fallback")
-                mean = np.full(num_tasks, mean.item() if mean.size == 1 else 0.0)
             scores = {tickers[i]: mean[i] for i in range(num_tasks)}
             window_results[win] = scores
             for etf, score in scores.items():
