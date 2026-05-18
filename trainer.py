@@ -10,25 +10,19 @@ from multitask_gp import train_mtgp, predict
 from sklearn.preprocessing import StandardScaler
 
 def create_dataset(returns_df, macro_df, window):
-    # Take last `window` days from returns
+    # Use last `window` days
     ret_win = returns_df.iloc[-window:].copy()
-    # Macro data aligned to the same dates as ret_win (use reindex)
-    macro_win = macro_df.reindex(ret_win.index).ffill()
-    # Drop rows where macro is NaN (if any)
-    combined = pd.concat([ret_win, macro_win], axis=1).dropna()
-    if len(combined) < 2:
-        return None, None
-    # Separate returns and macro
-    ret_aligned = combined[returns_df.columns]
-    macro_aligned = combined[macro_df.columns]
-    # Time index (normalised)
-    t = np.arange(len(ret_aligned)).reshape(-1,1) / len(ret_aligned)
-    macro_vals = macro_aligned.values
+    macro_win = macro_df.iloc[-window:] if not macro_df.empty else pd.DataFrame(0, index=ret_win.index, columns=config.MACRO_COLUMNS)
+    # Align indices (macro may have fewer rows due to NaN)
+    common = ret_win.index.intersection(macro_win.index)
+    ret_win = ret_win.loc[common]
+    macro_win = macro_win.loc[common]
+    t = np.arange(len(ret_win)).reshape(-1,1) / len(ret_win)
+    macro_vals = macro_win.values
     X = np.hstack([t, macro_vals])
-    # Target: next day return (shift -1)
-    Y = ret_aligned.shift(-1).dropna().values
-    X = X[:-1]  # align
-    return X, Y
+    Y = ret_win.shift(-1).dropna().values
+    X = X[:-1]
+    return torch.tensor(X, dtype=torch.float32), torch.tensor(Y, dtype=torch.float32)
 
 def main():
     if not config.HF_TOKEN:
@@ -62,22 +56,18 @@ def main():
                 continue
             print(f"  Processing window {win}d...")
             X, Y = create_dataset(returns, macro, win)
-            if X is None or X.shape[0] < 20:
-                print(f"    Not enough samples after alignment for window {win}d")
+            if X.shape[0] < 20:
                 continue
-            X_t = torch.tensor(X, dtype=torch.float32).to(device)
-            Y_t = torch.tensor(Y, dtype=torch.float32).to(device)
+            X_t = X.to(device)
+            Y_t = Y.to(device)
             num_tasks = Y.shape[1]
-            num_macros = len(config.MACRO_COLUMNS)
-            model, likelihood = train_mtgp(X_t, Y_t, num_tasks, num_macros,
-                                           n_inducing=config.N_INDUCING,
+            model, likelihood = train_mtgp(X_t, Y_t, num_tasks,
                                            lr=config.LR,
                                            iterations=config.ITERATIONS)
             # Predict for the most recent day (last row of X)
-            test_X = X[-1:].reshape(1, -1)
-            test_X_t = torch.tensor(test_X, dtype=torch.float32).to(device)
-            mean = predict(model, likelihood, test_X_t, num_tasks)
-            scores = {tickers[i]: mean[i] for i in range(num_tasks)}
+            test_X = X[-1:].to(device)
+            mean = predict(model, likelihood, test_X)
+            scores = {tickers[i]: mean[0, i] for i in range(num_tasks)}
             window_results[win] = scores
             for etf, score in scores.items():
                 if etf not in best_per_etf or score > best_per_etf[etf][0]:
