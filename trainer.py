@@ -24,7 +24,6 @@ def convert_to_serializable(obj):
 def create_dataset(returns_df, macro_df, window):
     ret_win = returns_df.iloc[-window:]
     macro_win = macro_df.iloc[-window:] if not macro_df.empty else pd.DataFrame(0, index=ret_win.index, columns=config.MACRO_COLUMNS)
-    # Align by index
     common_idx = ret_win.index.intersection(macro_win.index)
     ret_win = ret_win.loc[common_idx]
     macro_win = macro_win.loc[common_idx]
@@ -72,14 +71,16 @@ def main():
             X_t = torch.tensor(X, dtype=torch.float32).to(device)
             Y_t = torch.tensor(Y, dtype=torch.float32).to(device)
             num_tasks = Y.shape[1]
-            num_macros = len(config.MACRO_COLUMNS)
-            model, likelihood = train_mtgp(X_t, Y_t, num_tasks, num_macros,
+            model, likelihood = train_mtgp(X_t, Y_t, num_tasks,
                                            n_inducing=config.N_INDUCING,
                                            lr=config.LR,
                                            iterations=config.ITERATIONS)
             test_X = X[-1:].reshape(1, -1)
             test_X_t = torch.tensor(test_X, dtype=torch.float32).to(device)
             mean = predict(model, likelihood, test_X_t, num_tasks)
+            if mean.size != num_tasks:
+                print(f"    Warning: mean size {mean.size} != num_tasks {num_tasks}, using fallback")
+                mean = np.full(num_tasks, mean.item() if mean.size == 1 else 0.0)
             scores = {tickers[i]: mean[i] for i in range(num_tasks)}
             window_results[win] = scores
             for etf, score in scores.items():
